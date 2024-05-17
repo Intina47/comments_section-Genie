@@ -15,28 +15,71 @@ const languageClient = new client.LanguageServiceClient();
  */
 async function getComments(videoId, apiKey) {
   try {
+    // get video details
+    const videoResponse = await axios.get(`https://www.googleapis.com/youtube/v3/videos`, {
+      params: {
+        part: "snippet",
+        id: videoId,
+        key: apiKey,
+      },
+    });
+
+    const videoTitle = videoResponse.data.items[0].snippet.title;
+    const videoDescription = videoResponse.data.items[0].snippet.description;
+    const channelTitle = videoResponse.data.items[0].snippet.channelTitle;
+    let numQuestions = 0;
+
     const response = await axios.get(`https://www.googleapis.com/youtube/v3/commentThreads`, {
       params: {
         part: "snippet",
         videoId: videoId,
         key: apiKey,
-        maxResults: 10, 
+        maxResults: 20,
       },
     });
 
     const comments = await Promise.all(response.data.items.map(async (item) => {
-      const comment = preprocessComment(
-          item.snippet.topLevelComment.snippet.textDisplay,
-      );
-      const sentiment = await analyzeSentiment(comment);
-      const isQuestion = await analyzeSyntax(comment);
-      return {comment, sentiment, isQuestion};
+      try {
+        const comment = preprocessComment(
+            item.snippet.topLevelComment.snippet.textDisplay,
+        );
+        const sentiment = await analyzeSentiment(comment);
+        const isQuestion = await analyzeSyntax(comment);
+        const trends = await analyzeTrends(comment);
+
+        if (isQuestion) {
+          numQuestions++;
+        }
+
+        return {
+          comment,
+          sentiment,
+          isQuestion,
+          trends,
+        };
+      } catch (error) {
+        console.error("Error processing comment:", error);
+        return {
+          error: error.message,
+        };
+      }
     }));
 
-    return comments;
+    const validComments = comments.filter((comment) => !comment.error);
+
+    return [{
+      metadata: {
+        videoTitle,
+        videoDescription,
+        channelTitle,
+        numQuestions,
+      },
+      comments: validComments,
+    }];
   } catch (error) {
-    console.error(error);
-    return [];
+    return [{
+      error: error.message,
+    }];
   }
 }
 
@@ -67,20 +110,13 @@ exports.getVideoComments = functions.https.onRequest(
  * @return {string} The preprocessed comment.
  */
 function preprocessComment(comment) {
-  // Remove comments with URLs
   if (comment.match(/https?:\/\/\S+/)) {
     return "";
   }
-  // HTML decode
+
   comment = he.decode(comment);
-
-  // Convert to lowercase
   comment = comment.toLowerCase();
-
-  // Remove punctuation and special characters
   comment = comment.replace(/[^\w\s]|_/g, "").replace(/\s+/g, " ");
-
-  // Remove extra whitespace
   comment = comment.trim();
 
   return comment;
@@ -122,3 +158,32 @@ async function analyzeSyntax(text) {
 
   return isQuestion;
 }
+
+/**
+ * Analyzes trends in the given text and returns a list of entities.
+ * @param {string} text - The text to analyze.
+ * @return {Promise<Array<Object>>} - A promise that resolves to an
+ * array of entity objects.
+ */
+async function analyzeTrends(text) {
+  try {
+    const document = {
+      content: text,
+      type: "PLAIN_TEXT",
+    };
+
+    const [result] = await languageClient.analyzeEntities({document});
+
+    const entities = result.entities.map((entity) => ({
+      name: entity.name,
+      type: entity.type,
+      salience: entity.salience,
+    }));
+
+    return entities;
+  } catch (error) {
+    console.error("Error analyzing trends:", error);
+    return [];
+  }
+}
+
