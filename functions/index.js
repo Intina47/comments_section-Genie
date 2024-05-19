@@ -1,19 +1,51 @@
-/**
- * Import function triggers from their respective submodules:
- *
- * const {onCall} = require("firebase-functions/v2/https");
- * const {onDocumentWritten} = require("firebase-functions/v2/firestore");
- *
- * See a full list of supported triggers at https://firebase.google.com/docs/functions
- */
+const functions = require("firebase-functions");
+const {SessionsClient} = require("@google-cloud/dialogflow");
+const cors = require("cors")({origin: true});
 
-const {onRequest} = require("firebase-functions/v2/https");
-const logger = require("firebase-functions/logger");
+const projectId = "comment-section-genie";
+const location = "us-central1";
+const agentId = "352918a4-14e9-45f0-9781-f339d6057bf4";
 
-// Create and deploy your first functions
-// https://firebase.google.com/docs/functions/get-started
+const sessionClient = new SessionsClient({
+  apiEndpoint: `${location}-dialogflow.googleapis.com`,
+});
 
-// exports.helloWorld = onRequest((request, response) => {
-//   logger.info("Hello logs!", {structuredData: true});
-//   response.send("Hello from Firebase!");
-// });
+exports.dialogflowGateway = functions.https.onRequest((req, res) => {
+  cors(req, res, async () => {
+    try {
+      const sessionId = req.body.sessionId;
+      const query = req.body.query;
+      const languageCode = req.body.languageCode || "en";
+
+      const sessionPath = sessionClient.projectLocationAgentSessionPath(
+          projectId, location, agentId, sessionId,
+      );
+      const request = {
+        session: sessionPath,
+        queryInput: {
+          text: {
+            text: query,
+            languageCode: languageCode,
+          },
+        },
+      };
+
+      const [response] = await sessionClient.detectIntent(request);
+      const result = response.queryResult;
+
+      res.status(200).send({
+        queryText: result.queryText,
+        intent: result.intent.displayName,
+        fulfillmentText: result.fulfillmentText,
+        confidence: result.intentDetectionConfidence,
+      });
+    } catch (error) {
+      console.error("Dialogflow API request error:", error);
+      res.status(500).send({
+        error: "Internal Server Error",
+        message: error.message,
+        details: error.details,
+      });
+    }
+  });
+});
