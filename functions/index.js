@@ -10,15 +10,15 @@ const languageClient = new client.LanguageServiceClient();
  * Retrieves comments for a YouTube video using the YouTube Data API.
  * @param {string} videoId - The ID of the YouTube video.
  * @param {string} apiKey - The API key for accessing the YouTube Data API.
- * @return {Promise<Array<string>>} - A promise that resolves
-                                    * to an array of comments.
+ * @return {Promise<Object>} - A promise that resolves to an
+ * object with analysis results.
  */
 async function getComments(videoId, apiKey) {
   try {
-    // get video details
+    // Get video details
     const videoResponse = await axios.get(`https://www.googleapis.com/youtube/v3/videos`, {
       params: {
-        part: "snippet",
+        part: "snippet, statistics",
         id: videoId,
         key: apiKey,
       },
@@ -27,70 +27,85 @@ async function getComments(videoId, apiKey) {
     const videoTitle = videoResponse.data.items[0].snippet.title;
     const videoDescription = videoResponse.data.items[0].snippet.description;
     const channelTitle = videoResponse.data.items[0].snippet.channelTitle;
-    let numQuestions = 0;
+    const commentCount = videoResponse.data.items[0].statistics.commentCount;
 
     const response = await axios.get(`https://www.googleapis.com/youtube/v3/commentThreads`, {
       params: {
         part: "snippet",
         videoId: videoId,
         key: apiKey,
-        maxResults: 20,
+        maxResults: 100,
       },
     });
 
-    const comments = await Promise.all(response.data.items.map(async (item) => {
-      try {
-        const comment = preprocessComment(
-            item.snippet.topLevelComment.snippet.textDisplay,
-        );
-        const sentiment = await analyzeSentiment(comment);
-        const isQuestion = await analyzeSyntax(comment);
-        const trends = await analyzeTrends(comment);
+    let numComments = 0;
+    let numQuestions = 0;
+    let positiveComments = 0;
+    let neutralComments = 0;
+    let negativeComments = 0;
+    const trends = {};
 
-        if (isQuestion) {
-          numQuestions++;
+    for (const item of response.data.items) {
+      const commentText = preprocessComment(
+          item.snippet.topLevelComment.snippet.textDisplay,
+      );
+      if (!commentText) continue;
+
+      try {
+        const sentiment = await analyzeSentiment(commentText);
+        const isQuestion = await analyzeSyntax(commentText);
+        const commentTrends = await analyzeTrends(commentText);
+
+        numComments++;
+        if (isQuestion) numQuestions++;
+        if (sentiment.score > 0) {
+          positiveComments++;
+        } else if (sentiment.score < 0) {
+          negativeComments++;
+        } else {
+          neutralComments++;
         }
 
-        return {
-          comment,
-          sentiment,
-          isQuestion,
-          trends,
-        };
+        for (const trend of commentTrends) {
+          trends[trend.name] = (trends[trend.name] || 0) + 1;
+        }
       } catch (error) {
-        console.error("Error processing comment:", error);
-        return {
-          error: error.message,
-        };
+        console.error("Error analyzing comment:", error);
+        continue;
       }
-    }));
+    }
 
-    const validComments = comments.filter((comment) => !comment.error);
+    const positivePercentage = (positiveComments / numComments) * 100;
+    const neutralPercentage = (neutralComments / numComments) * 100;
+    const negativePercentage = (negativeComments / numComments) * 100;
 
-    return [{
+    return {
       metadata: {
         videoTitle,
-        videoDescription,
+        videoDescription: videoDescription.substring(0, 500),
         channelTitle,
+        commentCount,
         numQuestions,
+        positivePercentage,
+        neutralPercentage,
+        negativePercentage,
+        trends,
       },
-      comments: validComments,
-    }];
+    };
   } catch (error) {
-    return [{
+    return {
       error: error.message,
-    }];
+    };
   }
 }
 
 /**
  * Extracts the video ID from a YouTube URL.
- *
  * @param {string} url - The YouTube URL.
  * @return {string} The video ID.
  */
 function extractVideoId(url) {
-  const videoId = url.split("v=")[1];
+  const videoId = url.split("v=")[1].split("&")[0];
   return videoId;
 }
 
@@ -99,13 +114,12 @@ exports.getVideoComments = functions.https.onRequest(
       const apiKey = functions.config().youtube.apikey;
       const videoUrl = request.query.videoUrl;
       const videoId = extractVideoId(videoUrl);
-      const comments = await getComments(videoId, apiKey);
-      response.send(comments);
+      const commentsAnalysis = await getComments(videoId, apiKey);
+      response.send(commentsAnalysis);
     });
 
 /**
  * Preprocesses a comment by performing various transformations.
- *
  * @param {string} comment - The comment to be preprocessed.
  * @return {string} The preprocessed comment.
  */
@@ -141,9 +155,9 @@ async function analyzeSentiment(text) {
 /**
  * Analyzes the syntax of the given text and determines
  * if it contains a question.
- *
  * @param {string} text - The text to analyze.
- * @return {boolean} - True if the text contains a question, false otherwise.
+ * @return {boolean} - True if the text contains a question,
+ * false otherwise.
  */
 async function analyzeSyntax(text) {
   const document = {
@@ -163,7 +177,7 @@ async function analyzeSyntax(text) {
  * Analyzes trends in the given text and returns a list of entities.
  * @param {string} text - The text to analyze.
  * @return {Promise<Array<Object>>} - A promise that resolves to an
- * array of entity objects.
+ *  array of entity objects.
  */
 async function analyzeTrends(text) {
   try {
@@ -186,4 +200,3 @@ async function analyzeTrends(text) {
     return [];
   }
 }
-
