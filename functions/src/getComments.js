@@ -13,6 +13,11 @@ const {analyzeTrends} = require("./analyzeTrends");
  * object with analysis results.
  */
 async function getComments(videoId, apiKey) {
+  const maxComments = 300;
+  let comments = [];
+  let pageToken = "";
+  let totalComments = 0;
+
   try {
     const videoResponse = await axios.get(`https://www.googleapis.com/youtube/v3/videos`, {
       params: {
@@ -22,79 +27,97 @@ async function getComments(videoId, apiKey) {
       },
     });
 
-    const videoTitle = videoResponse.data.items[0].snippet.title;
-    const videoDescription = videoResponse.data.items[0].snippet.description;
-    const channelTitle = videoResponse.data.items[0].snippet.channelTitle;
-    const commentCount = videoResponse.data.items[0].statistics.commentCount;
+    const videoData = videoResponse.data.items[0];
+    const videoTitle = videoData.snippet.title;
+    const videoDescription = videoData.snippet.description;
+    const channelTitle = videoData.snippet.channelTitle;
+    const commentCount = videoData.statistics.commentCount;
 
-    const response = await axios.get(`https://www.googleapis.com/youtube/v3/commentThreads`, {
-      params: {
-        part: "snippet",
-        videoId,
-        key: apiKey,
-        maxResults: 100,
-      },
-    });
-
-    let numComments = 0;
     let numQuestions = 0;
     let positiveComments = 0;
     let neutralComments = 0;
     let negativeComments = 0;
     const trends = {};
 
-    for (const item of response.data.items) {
-      const commentText = preprocessComment(
-          item.snippet.topLevelComment.snippet.textDisplay,
-      );
-      if (!commentText) continue;
+    while (totalComments < maxComments && pageToken !== null) {
+      const response = await axios.get(`https://www.googleapis.com/youtube/v3/commentThreads`, {
+        params: {
+          part: "snippet",
+          videoId,
+          key: apiKey,
+          maxResults: 100,
+          pageToken,
+        },
+      });
 
-      try {
-        const sentiment = await analyzeSentiment(commentText);
-        const isQuestion = await analyzeSyntax(commentText);
-        const commentTrends = await analyzeTrends(commentText);
+      const items = response.data.items;
 
-        numComments++;
-        if (isQuestion) numQuestions++;
-        if (sentiment.score > 0) {
-          positiveComments++;
-        } else if (sentiment.score < 0) {
-          negativeComments++;
-        } else {
-          neutralComments++;
+      const commentPromises = items.map(async (item) => {
+        const commentText = preprocessComment(
+            item.snippet.topLevelComment.snippet.textDisplay,
+        );
+
+        if (!commentText) return null;
+
+        try {
+          const [sentiment, isQuestion, commentTrends] = await Promise.all([
+            analyzeSentiment(commentText),
+            analyzeSyntax(commentText),
+            analyzeTrends(commentText),
+          ]);
+
+          totalComments++;
+          if (isQuestion) numQuestions++;
+          if (sentiment.score > 0) {
+            positiveComments++;
+          } else if (sentiment.score < 0) {
+            negativeComments++;
+          } else {
+            neutralComments++;
+          }
+
+          for (const trend of commentTrends) {
+            trends[trend.name] = (trends[trend.name] || 0) + 1;
+          }
+
+          const positivePercentage = ((sentiment.score + 1) / 2) * 100;
+
+          return {
+            comment: commentText,
+            sentimentAnalysis: {
+              positivePercentage,
+            },
+            isQuestion,
+          };
+        } catch (error) {
+          console.error("Error analyzing comment:", error);
+          return null;
         }
+      });
 
-        for (const trend of commentTrends) {
-          trends[trend.name] = (trends[trend.name] || 0) + 1;
-        }
-      } catch (error) {
-        console.error("Error analyzing comment:", error);
-        continue;
-      }
+      const chunkComments = (
+        await Promise.all(commentPromises)
+      ).filter(Boolean);
+      comments = comments.concat(chunkComments);
+      pageToken = response.data.nextPageToken || null;
+
+      // Break if there are no more comments to fetch
+      if (!pageToken || totalComments >= maxComments) break;
     }
 
-    const positivePercentage = (positiveComments / numComments) * 100;
-    const neutralPercentage = (neutralComments / numComments) * 100;
-    const negativePercentage = (negativeComments / numComments) * 100;
+    const positivePercentage = (positiveComments / totalComments) * 100 || 0;
+    const neutralPercentage = (neutralComments / totalComments) * 100 || 0;
+    const negativePercentage = (negativeComments / totalComments) * 100 || 0;
 
-    const commentsData = {
-      videoId,
-      videoTitle,
-      videoDescription: videoDescription.substring(0, 500),
-      channelTitle,
-      commentCount,
-      numQuestions,
-      positivePercentage,
-      neutralPercentage,
-      negativePercentage,
-      trends,
-      comments: response.data.items.map(
-          (item) => item.snippet.topLevelComment.snippet.textDisplay,
-      ),
-    };
+    const filteredTrends = Object.keys(trends)
+        .filter((key) => trends[key] >= 4)
+        .reduce((obj, key) => {
+          obj[key] = trends[key];
+          return obj;
+        }, {});
 
     try {
-      await db.collection("comments").add(commentsData);
+      await db.collection("comments").add({videoId, comments});
     } catch (error) {
       console.error("Error saving comments to Firestore: ", error);
     }
@@ -109,10 +132,12 @@ async function getComments(videoId, apiKey) {
         positivePercentage,
         neutralPercentage,
         negativePercentage,
-        trends,
+        trends: filteredTrends,
       },
+      comments,
     };
   } catch (error) {
+    console.error("Error retrieving comments:", error);
     return {
       error: error.message,
     };
