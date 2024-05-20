@@ -1,25 +1,28 @@
 const axios = require("axios");
-const {db} = require("./firebaseAdmin");
 const {preprocessComment} = require("./preprocessComment");
 const {analyzeSentiment} = require("./analyzeSentiment");
 const {analyzeSyntax} = require("./analyzeSyntax");
 const {analyzeTrends} = require("./analyzeTrends");
 
+const axiosInstance = axios.create({
+  timeout: 60000,
+});
+
 /**
  * Retrieves comments for a YouTube video using the YouTube Data API.
  * @param {string} videoId - The ID of the YouTube video.
  * @param {string} apiKey - The API key for accessing the YouTube Data API.
- * @return {Promise<Object>} - A promise that resolves to an
- * object with analysis results.
+ * @return {Promise<Object>} - A promise that resolves
+ * to an object with analysis results.
  */
 async function getComments(videoId, apiKey) {
-  const maxComments = 300;
+  const maxComments = 150;
   let comments = [];
   let pageToken = "";
   let totalComments = 0;
 
   try {
-    const videoResponse = await axios.get(`https://www.googleapis.com/youtube/v3/videos`, {
+    const videoResponse = await axiosInstance.get(`https://www.googleapis.com/youtube/v3/videos`, {
       params: {
         part: "snippet,statistics",
         id: videoId,
@@ -40,23 +43,22 @@ async function getComments(videoId, apiKey) {
     const trends = {};
 
     while (totalComments < maxComments && pageToken !== null) {
-      const response = await axios.get(`https://www.googleapis.com/youtube/v3/commentThreads`, {
+      const response = await axiosInstance.get(`https://www.googleapis.com/youtube/v3/commentThreads`, {
         params: {
           part: "snippet",
           videoId,
           key: apiKey,
-          maxResults: 100,
+          maxResults: Math.min(maxComments - totalComments, 100),
           pageToken,
         },
       });
 
       const items = response.data.items;
 
-      const commentPromises = items.map(async (item) => {
+      const processComment = async (item) => {
         const commentText = preprocessComment(
             item.snippet.topLevelComment.snippet.textDisplay,
         );
-
         if (!commentText) return null;
 
         try {
@@ -68,13 +70,9 @@ async function getComments(videoId, apiKey) {
 
           totalComments++;
           if (isQuestion) numQuestions++;
-          if (sentiment.score > 0) {
-            positiveComments++;
-          } else if (sentiment.score < 0) {
-            negativeComments++;
-          } else {
-            neutralComments++;
-          }
+          if (sentiment.score > 0) positiveComments++;
+          else if (sentiment.score < 0) negativeComments++;
+          else neutralComments++;
 
           for (const trend of commentTrends) {
             trends[trend.name] = (trends[trend.name] || 0) + 1;
@@ -84,24 +82,30 @@ async function getComments(videoId, apiKey) {
 
           return {
             comment: commentText,
-            sentimentAnalysis: {
-              positivePercentage,
-            },
+            sentimentAnalysis: {positivePercentage},
             isQuestion,
           };
         } catch (error) {
           console.error("Error analyzing comment:", error);
           return null;
         }
-      });
+      };
 
-      const chunkComments = (
-        await Promise.all(commentPromises)
-      ).filter(Boolean);
-      comments = comments.concat(chunkComments);
+      const chunkSize = 10; // concurrency level
+      const commentChunks = [];
+      for (let i = 0; i < items.length; i += chunkSize) {
+        commentChunks.push(items.slice(i, i + chunkSize));
+      }
+
+      for (const chunk of commentChunks) {
+        const chunkComments = (
+          await Promise.all(chunk.map(processComment))
+        ).filter(Boolean);
+        comments = comments.concat(chunkComments);
+      }
+
       pageToken = response.data.nextPageToken || null;
 
-      // Break if there are no more comments to fetch
       if (!pageToken || totalComments >= maxComments) break;
     }
 
@@ -115,12 +119,6 @@ async function getComments(videoId, apiKey) {
           obj[key] = trends[key];
           return obj;
         }, {});
-
-    try {
-      await db.collection("comments").add({videoId, comments});
-    } catch (error) {
-      console.error("Error saving comments to Firestore: ", error);
-    }
 
     return {
       metadata: {
@@ -138,9 +136,7 @@ async function getComments(videoId, apiKey) {
     };
   } catch (error) {
     console.error("Error retrieving comments:", error);
-    return {
-      error: error.message,
-    };
+    return {error: error.message};
   }
 }
 
