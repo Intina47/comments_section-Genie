@@ -1,13 +1,14 @@
 const functions = require("firebase-functions");
-const {SessionsClient} = require("@google-cloud/dialogflow");
-const cors = require("cors")({origin: true});
+const { SessionsClient } = require("@google-cloud/dialogflow");
+const cors = require("cors")({ origin: true });
 
-const projectId = "comment-section-genie";
-const location = "us-central1";
-const agentId = "352918a4-14e9-45f0-9781-f339d6057bf4";
+const projectId = "commentssectiongenie";
+const location = "global";
+const agentId = "3e806724-9ff8-4006-a71d-c350b2a48b85";
+// projects/commentssectiongenie/locations/global/agents/3e806724-9ff8-4006-a71d-c350b2a48b85
 
 const sessionClient = new SessionsClient({
-  apiEndpoint: `${location}-dialogflow.googleapis.com`,
+  apiEndpoint: location + "-dialogflow.googleapis.com"
 });
 
 exports.dialogflowGateway = functions.https.onRequest((req, res) => {
@@ -18,7 +19,7 @@ exports.dialogflowGateway = functions.https.onRequest((req, res) => {
       const languageCode = req.body.languageCode || "en";
 
       const sessionPath = sessionClient.projectLocationAgentSessionPath(
-          projectId, location, agentId, sessionId,
+        projectId, location, agentId, sessionId
       );
       const request = {
         session: sessionPath,
