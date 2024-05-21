@@ -1,5 +1,4 @@
 const axios = require("axios");
-const {db} = require("./firebaseAdmin");
 const {preprocessComment} = require("./preprocessComment");
 const {analyzeSentiment} = require("./analyzeSentiment");
 const {analyzeSyntax} = require("./analyzeSyntax");
@@ -100,9 +99,6 @@ async function getComments(videoId, apiKey) {
       ).filter(Boolean);
       comments = comments.concat(chunkComments);
       pageToken = response.data.nextPageToken || null;
-
-      // Break if there are no more comments to fetch
-      if (!pageToken || totalComments >= maxComments) break;
     }
 
     const positivePercentage = (positiveComments / totalComments) * 100 || 0;
@@ -115,12 +111,6 @@ async function getComments(videoId, apiKey) {
           obj[key] = trends[key];
           return obj;
         }, {});
-
-    try {
-      await db.collection("comments").add({videoId, comments});
-    } catch (error) {
-      console.error("Error saving comments to Firestore: ", error);
-    }
 
     return {
       metadata: {
