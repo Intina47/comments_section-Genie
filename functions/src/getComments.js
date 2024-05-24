@@ -12,10 +12,11 @@ const {analyzeTrends} = require("./analyzeTrends");
  * object with analysis results.
  */
 async function getComments(videoId, apiKey) {
-  const maxComments = 300;
+  const maxComments = 100;
   let comments = [];
   let pageToken = "";
   let totalComments = 0;
+  const maxResultsPerPage = 100;
 
   try {
     const videoResponse = await axios.get(`https://www.googleapis.com/youtube/v3/videos`, {
@@ -44,12 +45,14 @@ async function getComments(videoId, apiKey) {
           part: "snippet",
           videoId,
           key: apiKey,
-          maxResults: 100,
+          maxResults: maxResultsPerPage,
           pageToken,
         },
+        timeout: 10000, // Set a timeout of 10 seconds for each request
       });
 
       const items = response.data.items;
+      pageToken = response.data.nextPageToken || null;
 
       const commentPromises = items.map(async (item) => {
         const commentText = preprocessComment(
@@ -65,7 +68,9 @@ async function getComments(videoId, apiKey) {
             analyzeTrends(commentText),
           ]);
 
+          if (totalComments >= maxComments) return null;
           totalComments++;
+
           if (isQuestion) numQuestions++;
           if (sentiment.score > 0) {
             positiveComments++;
@@ -98,7 +103,6 @@ async function getComments(videoId, apiKey) {
         await Promise.all(commentPromises)
       ).filter(Boolean);
       comments = comments.concat(chunkComments);
-      pageToken = response.data.nextPageToken || null;
     }
 
     const positivePercentage = (positiveComments / totalComments) * 100 || 0;
@@ -122,6 +126,7 @@ async function getComments(videoId, apiKey) {
         positivePercentage,
         neutralPercentage,
         negativePercentage,
+        totalComments,
         trends: filteredTrends,
       },
       comments,
